@@ -1,0 +1,19 @@
+# FloodGate: MQTT ACL File (Access Control List)
+# This file is optional and for future production use
+# Currently, anonymous access is allowed for local development
+
+# Pattern: <user> <topic> <permission>
+# user [read|write|readwrite] topic/pattern
+
+# Future production example:
+# user esp32_device_001 write system/esp32_device_001/status
+# user esp32_device_001 read system/esp32_device_001/cmd
+# 
+# user backend_api write system/+/cmd
+# user backend_api read system/+/status
+# user backend_api write system/+/ack
+#
+# user dashboard write system/+/status
+# user dashboard read system/+/status
+#
+# pattern read $SYS/#

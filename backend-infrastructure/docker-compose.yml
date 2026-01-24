@@ -1,0 +1,116 @@
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # INFRASTRUCTURE
+  # ==========================================================================
+  
+  db:
+    image: timescale/timescaledb:latest-pg15
+    container_name: floodgate_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: flood_system
+    ports:
+      - "5434:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: floodgate_mqtt
+    restart: always
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+
+  # ==========================================================================
+  # BACKEND SERVICES
+  # ==========================================================================
+
+  api:
+    build:
+      context: ../backend-core
+      dockerfile: Dockerfile
+    container_name: floodgate_api
+    restart: always
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/flood_system
+      MQTT_HOST: mqtt
+      MQTT_PORT: 1883
+    depends_on:
+      db:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+    volumes:
+      - ../backend-core:/app
+
+  worker:
+    build:
+      context: ../backend-core
+      dockerfile: Dockerfile.worker
+    container_name: floodgate_worker
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/flood_system
+      MQTT_HOST: mqtt
+      MQTT_PORT: 1883
+    depends_on:
+      db:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+    volumes:
+      - ../backend-core:/app
+
+  # ==========================================================================
+  # FRONTEND
+  # ==========================================================================
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: floodgate_frontend
+    restart: always
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8001
+    depends_on:
+      - api
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules
+
+  # ==========================================================================
+  # ADMIN TOOLS
+  # ==========================================================================
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: floodgate_pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+
+volumes:
+  db_data:

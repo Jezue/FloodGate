@@ -1,0 +1,25 @@
+# Global ignores for the Flood Protection System repo
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Node/Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Python/Backend/Simulator
+**/__pycache__/
+**/*.pyc
+backend-core/.venv/
+backend-core/.env
+simulation/*.log
+
+# PlatformIO/ESP32
+firmware/.pio/
+firmware/include/Secrets.h
+
+# Docker volumes (handled externally)
+# (No direct volumes here, leave managed by docker-compose)

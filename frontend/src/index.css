@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+@theme {
+  /* Muted Water Palette */
+  --color-water-50: #f0f9ff;
+  --color-water-100: #e0f2fe;
+  --color-water-200: #bae6fd;
+  --color-water-300: #7dd3fc;
+  --color-water-400: #38bdf8;
+  --color-water-500: #0ea5e9;
+  --color-water-600: #0284c7;
+  --color-water-700: #0369a1;
+  --color-water-800: #075985;
+  --color-water-900: #0c4a6e;
+  --color-water-950: #082f49;
+
+  /* Deep Palette */
+  --color-deep-900: #0B1120;
+  --color-deep-800: #151e32;
+
+  /* Danger Palette */
+  --color-danger: #ef4444;
+  --color-danger-high: #b91c1c;
+
+  /* Shadows */
+  --shadow-neu-flat: 5px 5px 10px #0b101d, -5px -5px 10px #152037;
+  --shadow-neu-pressed: inset 5px 5px 10px #0b101d, inset -5px -5px 10px #152037;
+  --shadow-glass: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+  
+  /* Fonts */
+  --font-sans: 'Inter', sans-serif;
+}
+
+/* Custom Base Styles */
+body {
+  background-color: var(--color-deep-900);
+  color: white;
+  font-family: var(--font-sans);
+}
