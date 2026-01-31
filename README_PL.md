@@ -61,6 +61,8 @@ Skrypt modyfikuje:
 | 🌤️ **Integracja z pogodą**           | Dane meteorologiczne z Open-Meteo API                         |
 | 🔄 **Dwa tryby pracy**               | AUTOMATYCZNY (natychmiastowy) lub MANUALNY (z potwierdzeniem) |
 | 🎮 **Symulator ESP32**               | Pełna integracja Wokwi w VS Code                              |
+| 🔌 **Autonomiczna praca**            | Non-blocking MQTT - działa offline                            |
+| 📅 **Harmonogramy**                  | Automatyczne podnoszenie/opuszczanie o określonych godzinach |
 
 ---
 
@@ -405,7 +407,7 @@ Dla rzeczywistych SMS w produkcji, wymagany jest **moduł GSM SIM800L**:
    - Zasilacz 4.2V dedykowany dla modułu (wymaga dużego prądu)
    - Połączenia TX/RX do ESP32 (piny określone w kodzie)
 
-2. **Implementacja:**
+2. **Implementacja:** Zobacz [firmware/README.md](firmware/README.md#-security--credentials) dla instrukcji konfiguracji.
    - Otwórz `firmware/src/main.cpp`
    - Znajdź funkcję `sendSMS()` - zawiera szczegółowy blok komentarza z kodem produkcyjnym
    - Odkomentuj kod SIM800L i zakomentuj linie MQTT
@@ -433,10 +435,11 @@ Zwraca aktualny status urządzenia z danymi pogodowymi.
 {
   "device_id": "ESP32_MAIN_001",
   "telemetry": {
-    "water_sensor_status": 0,
-    "curtain_state": 0,
-    "battery_soc_perc": 74,
-    "water_level_cm": 8
+    "water_level_cm": 3.2,
+    "gate_closed": 0,
+    "battery_pct": 85,
+    "state": "IDLE",
+    "scheduler_locked": 0
   },
   "logic": {
     "current_mode": "AUTOMATIC",
@@ -450,6 +453,15 @@ Zwraca aktualny status urządzenia z danymi pogodowymi.
 }
 ```
 
+**Pola telemetrii:**
+- `water_level_cm` - Poziom wody w centymetrach (zakres 0-50cm)
+- `gate_closed` - Stan bramy: 0=OTWARTA, 1=ZAMKNIĘTA
+- `battery_pct` - Procent baterii (0-100%)
+- `state` - Stan systemu: IDLE, WATER_DETECTED, CLOSED, AUTO_DROP, itp.
+- `scheduler_locked` - Blokada harmonogramu: 0=odblokowany, 1=zablokowany (wykryto wodę)
+
+> **Uwaga:** Firmware wysyła również pola kompatybilne wstecz (`water_sensor_status`, `curtain_state`, `battery_soc_perc`) dla zgodności z poprzednimi wersjami.
+
 ### POST /api/v1/command
 
 Wyślij manualną komendę do urządzenia.
@@ -460,6 +472,58 @@ Wyślij manualną komendę do urządzenia.
   "action": "DROP" // lub "RAISE"
 }
 ```
+
+### GET /api/v1/telemetry
+
+Pobierz historię danych telemetrycznych (szeregi czasowe).
+
+**Parametry zapytania:**
+- `device_id` - Identyfikator urządzenia (domyślnie: ESP32_MAIN_001)
+- `limit` - Liczba rekordów (domyślnie: 100)
+
+**Odpowiedź:** Tablica rekordów telemetrycznych z znacznikami czasu.
+
+### GET /api/v1/alarms
+
+Pobierz historię alarmów (zdarzenia wykrycia wody).
+
+**Parametry zapytania:**
+- `device_id` - Identyfikator urządzenia
+- `limit` - Liczba rekordów (domyślnie: 50)
+
+### GET /api/v1/commands
+
+Pobierz historię komend (akcje użytkownika, akcje harmonogramu).
+
+**Parametry zapytania:**
+- `device_id` - Identyfikator urządzenia
+- `limit` - Liczba rekordów (domyślnie: 50)
+
+### GET /api/v1/schedules
+
+Pobierz skonfigurowane harmonogramy automatyzacji.
+
+**Odpowiedź:**
+```json
+[
+  {
+    "id": 1,
+    "device_id": "ESP32_MAIN_001",
+    "action_type": "daily_raise",
+    "hour": 8,
+    "minute": 0,
+    "days": ["mon", "tue", "wed", "thu", "fri"],
+    "active": true,
+    "custom_label": "Poranne otwarcie"
+  }
+]
+```
+
+**Funkcje harmonogramu:**
+- Automatyczne podnoszenie/opuszczanie o określonych godzinach
+- Filtrowanie dni tygodnia (np. tylko dni robocze)
+- Zabezpieczenie: harmonogram blokowany gdy wykryto wodę
+- Worker monitoruje harmonogramy co minutę
 
 ---
 
@@ -494,11 +558,48 @@ Ta sekcja dokumentuje znane ograniczenia i architektoniczne wybory będące akce
 
 **Rezultat:** Urządzenie utrzymuje responsywną komunikację MQTT i przetwarza komendy użytkownika natychmiast podczas ruchu bramy.
 
-### 4. Timer Fail-Safe
+### 4. Non-Blocking MQTT Reconnect
+
+**Wyzwanie Projektowe:** Początkowa implementacja używała blokującej pętli połączenia MQTT w `setup()`, uniemożliwiając ESP32 uruchomienie się jeśli broker był niedostępny. Urządzenie zawieszało się w nieskończoność pokazując "Booting..." na OLED.
+
+**Rozwiązanie Architektoniczne:**
+
+- **Faza Setup:** Maksymalnie 3 próby połączenia z timeoutem 1 sekundy każda
+- **Faza Loop:** Non-blocking reconnect co 30 sekund
+- **Tryb Autonomiczny:** Urządzenie działa w pełni offline jeśli MQTT niedostępny
+
+**Implementacja:**
+```cpp
+// setup() - Próbuj 3 razy, potem kontynuuj
+int mqttAttempts = 0;
+while (!client.connected() && mqttAttempts < 3) {
+  if (client.connect(DEVICE_ID)) break;
+  mqttAttempts++;
+  delay(1000);
+}
+// Kontynuuj niezależnie od statusu połączenia
+
+// loop() - Ponów próbę co 30 sekund (non-blocking)
+static unsigned long lastMqttRetry = 0;
+if (!client.connected() && (millis() - lastMqttRetry > 30000)) {
+  lastMqttRetry = millis();
+  client.connect(DEVICE_ID);  // Pojedyncza próba, bez blokowania
+}
+```
+
+**Korzyści:**
+- ✅ ESP32 uruchamia się w 3-4 sekundy nawet bez brokera MQTT
+- ✅ Czujniki, OLED i sterowanie silnikiem działają offline
+- ✅ Automatyczne ponowne połączenie gdy broker staje się dostępny
+- ✅ Wykrywanie wody i auto-zamykanie działa bez backendu
+
+**Rezultat:** Urządzenie jest w pełni autonomiczne i odporne na awarie sieci.
+
+### 5. Ręczny Timer Fail-Safe
 
 Odliczanie fail-safe opiera się na liczniku po stronie klienta. W systemach krytycznych mechanizm ten powinien być zdublowany po stronie urządzenia (sprzętowy watchdog lub timer), egzekwując bezpieczny stan nawet przy braku łączności.
 
-### 5. Zarządzanie Uwierzytelnieniami
+### 6. Zarządzanie Uwierzytelnieniami
 
 **Wybór Projektowy:** Wrażliwe uwierzytelnienia (WiFi, MQTT, GSM) przechowywane w gitignorowanym pliku `Secrets.h`, nigdy nie zatwierdzane do repozytorium.
 

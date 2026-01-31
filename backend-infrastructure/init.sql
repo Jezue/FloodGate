@@ -2,11 +2,13 @@
 CREATE TABLE IF NOT EXISTS device_telemetry (
     time TIMESTAMPTZ NOT NULL,
     device_id TEXT NOT NULL,
-    water_sensor_status INT NOT NULL, -- Enum: 0=OK, 1=DETECTED
-    curtain_state INT NOT NULL,       -- Enum: 0=UP, 1=DOWN, 2=MOVING, 3=ERROR
-    battery_soc_perc INT NOT NULL,
-    system_state_code INT NOT NULL,   -- Enum: 0=STANDBY, 1=LOW_BATTERY, 2=PRE_ALARM, 3=ALARM_WATER...
-    risk_index FLOAT DEFAULT 0.0      -- From WeatherData
+    water_level_cm FLOAT NOT NULL DEFAULT 0.0,  -- Water level in centimeters (0-50cm)
+    gate_closed INT NOT NULL DEFAULT 0,         -- Gate state: 0=OPEN, 1=CLOSED
+    battery_pct INT NOT NULL DEFAULT 100,       -- Battery percentage (0-100%)
+    state TEXT NOT NULL DEFAULT 'IDLE',         -- System state: IDLE, WATER_DETECTED, CLOSED, etc.
+    scheduler_locked INT NOT NULL DEFAULT 0,    -- Scheduler lock: 0=unlocked, 1=locked
+    system_state_code INT NOT NULL DEFAULT 0,   -- Legacy state code for compatibility
+    risk_index FLOAT DEFAULT 0.0                -- From WeatherData
 );
 
 -- Convert to TimescaleDB Hypertable
@@ -18,19 +20,29 @@ CREATE TABLE IF NOT EXISTS current_device_state (
     last_seen TIMESTAMPTZ,
     connection_status TEXT DEFAULT 'OFFLINE', -- 'ONLINE' | 'OFFLINE'
     
-    -- Telemetry Cache
-    water_sensor_status INT DEFAULT 0,
-    curtain_state INT DEFAULT 0,
-    battery_soc_perc INT DEFAULT 100,
+    -- Telemetry Cache (PDF-compliant field names)
+    water_level_cm FLOAT DEFAULT 0.0,         -- Water level in cm (0-50cm range)
+    gate_closed INT DEFAULT 0,                -- Gate state: 0=OPEN, 1=CLOSED
+    battery_pct INT DEFAULT 100,              -- Battery percentage (0-100%)
+    state TEXT DEFAULT 'IDLE',                -- System state: IDLE, WATER_DETECTED, CLOSED, AUTO_DROP, etc.
+    scheduler_locked INT DEFAULT 0,           -- Scheduler lock: 0=unlocked, 1=locked during alarm
     
     -- Logic State
     current_mode TEXT DEFAULT 'AUTOMATIC',    -- 'AUTOMATIC' | 'KONTROLA' | 'MANUAL'
-    current_state_code INT DEFAULT 0,
+    current_state_code INT DEFAULT 0,         -- Legacy state code
     fail_safe_deadline TIMESTAMPTZ,
     
     -- Config (synced to NVS)
     fail_safe_timeout_min INT DEFAULT 5
 );
+
+
+COMMENT ON COLUMN current_device_state.water_level_cm IS 'Water level in centimeters (0-50cm range from analog sensor)';
+COMMENT ON COLUMN current_device_state.gate_closed IS 'Gate state: 0=OPEN, 1=CLOSED';
+COMMENT ON COLUMN current_device_state.battery_pct IS 'Battery percentage (0-100%)';
+COMMENT ON COLUMN current_device_state.state IS 'System state from firmware: IDLE, WATER_DETECTED, CLOSED, AUTO_DROP, etc.';
+COMMENT ON COLUMN current_device_state.scheduler_locked IS 'Scheduler lock: 0=unlocked, 1=locked during water alarm';
+
 
 -- FloodGate: Command Queue (Async Control)
 CREATE TABLE IF NOT EXISTS command_queue (
@@ -42,9 +54,31 @@ CREATE TABLE IF NOT EXISTS command_queue (
     executed_at TIMESTAMPTZ
 );
 
--- FloodGate: Seed Initial Device
-INSERT INTO current_device_state (device_id, last_seen, connection_status)
-VALUES ('ESP32_MAIN_001', NOW(), 'OFFLINE')
+-- FloodGate:-- ============================================================================
+-- SCHEDULES TABLE
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS schedules (
+    id SERIAL PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    action_type TEXT NOT NULL CHECK (action_type IN ('OPEN', 'CLOSE')),
+    hour INT NOT NULL CHECK (hour >= 0 AND hour <= 23),
+    minute INT NOT NULL CHECK (minute >= 0 AND minute <= 59),
+    days JSONB NOT NULL,  -- ["monday", "tuesday", "wednesday", ...]
+    active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedules_device ON schedules(device_id);
+CREATE INDEX IF NOT EXISTS idx_schedules_active ON schedules(active);
+CREATE INDEX IF NOT EXISTS idx_schedules_time ON schedules(hour, minute);
+
+COMMENT ON TABLE schedules IS 'Harmonogramy działań (FR-10, Scenariusz S4)';
+COMMENT ON COLUMN schedules.action_type IS 'Typ akcji: OPEN (podniesienie) lub CLOSE (opuszczenie)';
+COMMENT ON COLUMN schedules.days IS 'Dni tygodnia w formacie JSON array, np. ["monday", "friday"]';
+
+-- Seed initial data
+INSERT INTO current_device_state (device_id, connection_status, current_mode, fail_safe_timeout_min)
+VALUES ('ESP32_001', 'OFFLINE', 'AUTOMATIC', 5)
 ON CONFLICT (device_id) DO NOTHING;
 
 -- FloodGate: System Config Table (for configurable settings)

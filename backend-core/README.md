@@ -47,8 +47,10 @@ Example response:
   "connection_status": "ONLINE",
   "telemetry": {
     "water_level_cm": 3.2,
-    "battery_soc_perc": 85,
-    "curtain_state": 0
+    "gate_closed": 0,
+    "battery_pct": 85,
+    "state": "IDLE",
+    "scheduler_locked": 0
   },
   "logic": {
     "current_mode": "AUTOMATIC",
@@ -62,6 +64,15 @@ Example response:
   "timestamp": 1707043200
 }
 ```
+
+**Telemetry Fields:**
+- `water_level_cm` - Water level in centimeters (0-50cm range)
+- `gate_closed` - Gate state: 0=OPEN, 1=CLOSED
+- `battery_pct` - Battery percentage (0-100%)
+- `state` - System state: IDLE, WATER_DETECTED, CLOSED, AUTO_DROP, etc.
+- `scheduler_locked` - Scheduler lock: 0=unlocked, 1=locked (water detected)
+
+> **Note:** Backend also accepts legacy field names (`water_sensor_status`, `curtain_state`, `battery_soc_perc`) for backward compatibility. Worker normalizes all incoming data to new field names.
 
 **Weather Fields (Simplified):**
 - `temperature_celsius`: Current ambient temperature

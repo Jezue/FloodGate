@@ -66,6 +66,48 @@ def on_message(client, userdata, msg):
         logger.error(f"❌ Error processing MQTT message: {e}")
 
 
+def normalize_telemetry_payload(payload: dict) -> dict:
+    """
+    Normalize MQTT payload: convert old field names to new standard names
+    
+    Conversions:
+    - water_sensor_status (0/1) → water_level_cm (float)
+    - curtain_state (0-3) → gate_closed (bool)
+    - battery_soc_perc → battery_pct
+    
+    Returns: Normalized payload with standard field names
+    """
+    normalized = payload.copy()
+    
+    # 1. Water sensor: binary status → level in cm
+    if "water_sensor_status" in payload and "water_level_cm" not in payload:
+        # Convert binary status to approximate water level
+        # 0 = no water (0cm), 1 = water detected (assume 15cm)
+        normalized["water_level_cm"] = 15.0 if payload["water_sensor_status"] == 1 else 0.0
+        logger.debug(f"Normalized: water_sensor_status={payload['water_sensor_status']} → water_level_cm={normalized['water_level_cm']}")
+    
+    # 2. Curtain state: enum → boolean
+    if "curtain_state" in payload and "gate_closed" not in payload:
+        # curtain_state: 0=UP, 1=DOWN, 2=MOVING, 3=ERROR
+        # gate_closed: 1 if DOWN or MOVING, else 0
+        normalized["gate_closed"] = 1 if payload["curtain_state"] in [1, 2] else 0
+        logger.debug(f"Normalized: curtain_state={payload['curtain_state']} → gate_closed={normalized['gate_closed']}")
+    
+    # 3. Battery: rename field
+    if "battery_soc_perc" in payload and "battery_pct" not in payload:
+        normalized["battery_pct"] = payload["battery_soc_perc"]
+        logger.debug(f"Normalized: battery_soc_perc → battery_pct={normalized['battery_pct']}")
+    
+    # 4. Ensure all required fields exist with defaults
+    normalized.setdefault("water_level_cm", 0.0)
+    normalized.setdefault("gate_closed", 0)
+    normalized.setdefault("battery_pct", 100)
+    normalized.setdefault("state", "IDLE")
+    normalized.setdefault("scheduler_locked", 0)
+    
+    return normalized
+
+
 def database_worker_thread():
     """Background thread that processes queued messages"""
     logger.info("🔄 Database worker thread started")
@@ -226,12 +268,16 @@ def database_worker_thread():
                     # This prevents telemetry handler from overwriting current_state_code
                     continue
 
+
                 # === HANDLE TELEMETRY (standard) ===
                 # Skip non-telemetry messages
                 if not isinstance(payload, dict) or "device_id" not in payload:
                     continue
 
-                # Parse telemetry
+                # Normalize payload: convert old field names to new standard names
+                payload = normalize_telemetry_payload(payload)
+
+                # Parse telemetry (now using normalized field names)
                 w_status = 1 if payload.get(
                     "water_detected") or payload.get("water_alarm") else 0
                 c_state = 1 if payload.get(
@@ -257,37 +303,38 @@ def database_worker_thread():
                 mapped_state_code = state_code_map.get(system_state, 0)
 
                 try:
-                    # Log telemetry to history table
+                    # Log telemetry to history table (using new field names)
                     conn.execute(text("""
                         INSERT INTO device_telemetry
-                        (time, device_id, water_sensor_status, curtain_state,
-                         battery_soc_perc, system_state_code, risk_index)
-                        VALUES (NOW(), :did, :w, :c, :b, 0, :risk)
+                        (time, device_id, water_level_cm, gate_closed,
+                         battery_pct, state, scheduler_locked, system_state_code, risk_index)
+                        VALUES (NOW(), :did, :wl, :gc, :bp, :st, :lock, :code, :risk)
                     """), {
                         "did": device_id,
-                        "w": w_status,
-                        "c": c_state,
-                        "b": battery,
+                        "wl": water_level_cm,
+                        "gc": c_state,  # gate_closed (0=OPEN, 1=CLOSED)
+                        "bp": battery,
+                        "st": system_state,
+                        "lock": scheduler_locked,
+                        "code": mapped_state_code,
                         "risk": risk_index
                     })
 
-                    # Update device shadow state (preserve fail-safe state codes)
+                    # Update device shadow state (using new field names)
                     conn.execute(text("""
                         INSERT INTO current_device_state
                         (device_id, last_seen, connection_status,
-                         water_sensor_status, curtain_state, battery_soc_perc,
-                         current_mode, water_level_cm, system_state,
-                         scheduler_locked, current_state_code)
-                        VALUES (:did, NOW(), 'ONLINE', :w, :c, :b, :m, :wl,
-                                :st, :lock, :code)
+                         water_level_cm, gate_closed, battery_pct, state,
+                         scheduler_locked, current_mode, current_state_code)
+                        VALUES (:did, NOW(), 'ONLINE', :wl, :gc, :bp, :st,
+                                :lock, :m, :code)
                         ON CONFLICT (device_id) DO UPDATE SET
                         last_seen = NOW(),
                         connection_status = 'ONLINE',
-                        water_sensor_status = EXCLUDED.water_sensor_status,
-                        curtain_state = EXCLUDED.curtain_state,
-                        battery_soc_perc = EXCLUDED.battery_soc_perc,
                         water_level_cm = EXCLUDED.water_level_cm,
-                        system_state = EXCLUDED.system_state,
+                        gate_closed = EXCLUDED.gate_closed,
+                        battery_pct = EXCLUDED.battery_pct,
+                        state = EXCLUDED.state,
                         scheduler_locked = EXCLUDED.scheduler_locked,
                         current_state_code = CASE
                             WHEN current_device_state.current_state_code IN (4, 5)
@@ -296,13 +343,12 @@ def database_worker_thread():
                         END
                     """), {
                         "did": device_id,
-                        "w": w_status,
-                        "c": c_state,
-                        "b": battery,
-                        "m": mode,
                         "wl": water_level_cm,
+                        "gc": c_state,  # gate_closed
+                        "bp": battery,
                         "st": system_state,
                         "lock": scheduler_locked,
+                        "m": mode,
                         "code": mapped_state_code
                     })
 

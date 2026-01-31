@@ -173,6 +173,75 @@ const unsigned long STEPPER_MOTOR_TIMEOUT_MS = 120000;  // 2 minutes safety time
 }
 ```
 
+## 🔌 Non-Blocking MQTT Reconnect
+
+### Design Problem
+
+Initial implementation used blocking connection loop in `setup()`, preventing ESP32 from booting if MQTT broker was unavailable. Device would hang indefinitely showing "Booting..." on OLED.
+
+### Solution
+
+**Setup Phase (Max 3 attempts):**
+```cpp
+// Try to connect to MQTT (max 3 attempts, non-blocking)
+Serial.print("⏳ Connecting to MQTT");
+int mqttAttempts = 0;
+while (!client.connected() && mqttAttempts < 3) {
+  Serial.print(".");
+  if (client.connect(DEVICE_ID)) {
+    Serial.println(" ✅");
+    client.subscribe("system/" DEVICE_ID "/action");
+    client.subscribe("system/" DEVICE_ID "/user_command");
+    client.subscribe("system/" DEVICE_ID "/schedule_command");
+    sendTelemetry();
+    break;
+  }
+  mqttAttempts++;
+  delay(1000);
+}
+
+if (!client.connected()) {
+  Serial.println(" ❌");
+  Serial.println("⚠️  MQTT offline - running in AUTONOMOUS mode");
+}
+
+Serial.println("✓ Entering main loop\n");
+```
+
+**Loop Phase (Retry every 30 seconds):**
+```cpp
+// Non-blocking MQTT reconnect (try every 30 seconds)
+static unsigned long lastMqttRetry = 0;
+if (!client.connected()) {
+  unsigned long now = millis();
+  if (now - lastMqttRetry > 30000) {  // Try every 30 seconds
+    lastMqttRetry = now;
+    Serial.print("⏳ MQTT reconnect...");
+    if (client.connect(DEVICE_ID)) {
+      Serial.println(" ✅");
+      client.subscribe("system/" DEVICE_ID "/action");
+      // ... subscribe to other topics
+      sendTelemetry();
+    } else {
+      Serial.println(" ❌");
+    }
+  }
+} else {
+  client.loop();  // Process MQTT messages only when connected
+}
+```
+
+### Benefits
+
+✅ **Fast Boot:** ESP32 boots in 3-4 seconds even without MQTT broker  
+✅ **Autonomous Operation:** Sensors, OLED, and motor control work offline  
+✅ **Auto-Reconnect:** Automatic reconnection when broker becomes available  
+✅ **Safety First:** Water detection and auto-close work without backend  
+
+### Result
+
+Device is fully autonomous and resilient to network failures. Critical safety functions (water detection, gate closure) operate independently of cloud connectivity.
+
 ## 💾 EEPROM Management & Wear Protection
 
 ### Overview

@@ -165,10 +165,33 @@ async def fetch_current_weather(latitude: float = 52.22, longitude: float = 21.0
 
 
 class TelemetryData(BaseModel):
-    water_sensor_status: int
-    curtain_state: int
-    battery_soc_perc: int
-    water_level_cm: int = 0
+    # Primary field names
+    water_level_cm: Optional[float] = 0.0
+    gate_closed: Optional[int] = 0
+    battery_pct: Optional[int] = 100
+    state: Optional[str] = "IDLE"
+    
+    # Backward compatibility (deprecated)
+    water_sensor_status: Optional[int] = None
+    curtain_state: Optional[int] = None
+    battery_soc_perc: Optional[int] = None
+    
+    # Normalize old field names to new ones
+    def __init__(self, **data):
+        # Map old names to new names if present
+        if 'water_sensor_status' in data and 'water_level_cm' not in data:
+            # Convert binary status to approximate level
+            data['water_level_cm'] = 15.0 if data['water_sensor_status'] == 1 else 0.0
+        
+        if 'curtain_state' in data and 'gate_closed' not in data:
+            # curtain_state: 0=UP, 1=DOWN, 2=MOVING, 3=ERROR
+            data['gate_closed'] = 1 if data.get('curtain_state') in [1, 2] else 0
+        
+        if 'battery_soc_perc' in data and 'battery_pct' not in data:
+            data['battery_pct'] = data['battery_soc_perc']
+        
+        super().__init__(**data)
+
 
 
 class LogicState(BaseModel):
@@ -428,10 +451,11 @@ async def get_status(device_id: str, db: AsyncSession = Depends(get_db)):
                 device_id=device_id,
                 connection_status="OFFLINE",
                 telemetry=TelemetryData(
-                    water_sensor_status=0,
-                    curtain_state=0,
-                    battery_soc_perc=0,
-                    water_level_cm=0
+                    water_level_cm=0.0,
+                    gate_closed=0,
+                    battery_pct=0,
+                    state="OFFLINE",
+                    scheduler_locked=0
                 ),
                 logic=LogicState(
                     current_mode="UNKNOWN",
@@ -450,10 +474,11 @@ async def get_status(device_id: str, db: AsyncSession = Depends(get_db)):
             connection_status=row.connection_status,
             last_seen=row.last_seen.isoformat() if row.last_seen else None,
             telemetry=TelemetryData(
-                water_sensor_status=row.water_sensor_status,
-                curtain_state=row.curtain_state,
-                battery_soc_perc=row.battery_soc_perc,
-                water_level_cm=getattr(row, "water_level_cm", 0) or 0
+                water_level_cm=getattr(row, "water_level_cm", 0.0) or 0.0,
+                gate_closed=getattr(row, "gate_closed", 0) or 0,
+                battery_pct=getattr(row, "battery_pct", 100) or 100,
+                state=getattr(row, "state", "IDLE") or "IDLE",
+                scheduler_locked=getattr(row, "scheduler_locked", 0) or 0
             ),
             logic=LogicState(
                 current_mode=row.current_mode or "AUTOMATIC",
@@ -651,7 +676,7 @@ async def list_devices(db: AsyncSession = Depends(get_db)):
     try:
         result = await db.execute(
             text("""
-                SELECT device_id, connection_status, last_seen, battery_soc_perc, current_mode
+                SELECT device_id, connection_status, last_seen, battery_pct, current_mode
                 FROM current_device_state
                 ORDER BY last_seen DESC
             """)
@@ -818,3 +843,132 @@ async def toggle_schedule(id: int, db: AsyncSession = Depends(get_db)):
         logger.error(f"❌ Toggle schedule error: {e}")
         await db.rollback()
         raise HTTPException(500, "Failed to toggle schedule")
+
+
+# ============================================================
+# Additional API Endpoints
+# ============================================================
+
+@app.get("/api/v1/telemetry", tags=["Telemetry"])
+async def get_telemetry(
+    device_id: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get historical telemetry data for a device
+    """
+    try:
+        query = "SELECT * FROM device_telemetry WHERE device_id = :did"
+        params = {"did": device_id}
+        
+        if start_time:
+            query += " AND time >= :start"
+            params["start"] = start_time
+        if end_time:
+            query += " AND time <= :end"
+            params["end"] = end_time
+        
+        query += " ORDER BY time DESC LIMIT :limit"
+        params["limit"] = limit
+        
+        result = await db.execute(text(query), params)
+        rows = result.fetchall()
+        
+        telemetry = []
+        for row in rows:
+            telemetry.append({
+                "time": row.time.isoformat() if row.time else None,
+                "device_id": row.device_id,
+                "water_level_cm": row.water_level_cm,
+                "gate_closed": row.gate_closed,
+                "battery_pct": row.battery_pct,
+                "state": row.state,
+                "scheduler_locked": row.scheduler_locked,
+                "system_state_code": row.system_state_code,
+                "risk_index": row.risk_index if hasattr(row, 'risk_index') else 0.0
+            })
+        
+        logger.info(f"✅ Fetched {len(telemetry)} telemetry records for {device_id}")
+        return {"device_id": device_id, "count": len(telemetry), "data": telemetry}
+    
+    except Exception as e:
+        logger.error(f"❌ Error fetching telemetry: {e}")
+        raise HTTPException(500, f"Failed to fetch telemetry: {str(e)}")
+
+
+@app.get("/api/v1/alarms", tags=["Alarms"])
+async def get_alarms(
+    device_id: str,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get alarm history for a device
+    """
+    try:
+        result = await db.execute(text("""
+            SELECT * FROM alarm_log
+            WHERE device_id = :did
+            ORDER BY time DESC
+            LIMIT :limit
+        """), {"did": device_id, "limit": limit})
+        
+        rows = result.fetchall()
+        alarms = []
+        for row in rows:
+            alarms.append({
+                "id": row.id if hasattr(row, 'id') else None,
+                "device_id": row.device_id,
+                "alarm_type": row.alarm_type,
+                "mode_used": row.mode_used if hasattr(row, 'mode_used') else None,
+                "timeout_minutes": row.timeout_minutes if hasattr(row, 'timeout_minutes') else None,
+                "time": row.time.isoformat() if row.time else None
+            })
+        
+        logger.info(f"✅ Fetched {len(alarms)} alarms for {device_id}")
+        return {"device_id": device_id, "count": len(alarms), "alarms": alarms}
+    
+    except Exception as e:
+        logger.warning(f"⚠️ Alarm log query failed (table may not exist): {e}")
+        # Return empty list if table doesn't exist
+        return {"device_id": device_id, "count": 0, "alarms": []}
+
+
+@app.get("/api/v1/commands", tags=["Commands"])
+async def get_commands(
+    device_id: str,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get command history for a device
+    """
+    try:
+        result = await db.execute(text("""
+            SELECT * FROM command_queue
+            WHERE device_id = :did
+            ORDER BY created_at DESC
+            LIMIT :limit
+        """), {"did": device_id, "limit": limit})
+        
+        rows = result.fetchall()
+        commands = []
+        for row in rows:
+            commands.append({
+                "cmd_id": str(row.cmd_id),
+                "device_id": row.device_id,
+                "action": row.action,
+                "status": row.status,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "executed_at": row.executed_at.isoformat() if row.executed_at else None
+            })
+        
+        logger.info(f"✅ Fetched {len(commands)} commands for {device_id}")
+        return {"device_id": device_id, "count": len(commands), "commands": commands}
+    
+    except Exception as e:
+        logger.error(f"❌ Error fetching commands: {e}")
+        raise HTTPException(500, f"Failed to fetch commands: {str(e)}")

@@ -61,6 +61,8 @@ This changes:
 | 🌤️ **Weather Integration**       | Current weather from Open-Meteo API          |
 | 🔄 **Two Operation Modes**       | AUTOMATIC (instant) or MANUAL (confirmation) |
 | 🎮 **ESP32 Simulator**           | Full Wokwi integration in VS Code            |
+| 🔌 **Autonomous Operation**      | Non-blocking MQTT - works offline            |
+| 📅 **Scheduler Support**         | Automated daily raise/drop times             |
 
 ---
 
@@ -432,10 +434,11 @@ Returns current device status with weather data.
 {
   "device_id": "ESP32_MAIN_001",
   "telemetry": {
-    "water_sensor_status": 0,
-    "curtain_state": 0,
-    "battery_soc_perc": 74,
-    "water_level_cm": 8
+    "water_level_cm": 3.2,
+    "gate_closed": 0,
+    "battery_pct": 85,
+    "state": "IDLE",
+    "scheduler_locked": 0
   },
   "logic": {
     "current_mode": "AUTOMATIC",
@@ -449,6 +452,15 @@ Returns current device status with weather data.
 }
 ```
 
+**Telemetry Fields:**
+- `water_level_cm` - Water level in centimeters (0-50cm range)
+- `gate_closed` - Gate state: 0=OPEN, 1=CLOSED
+- `battery_pct` - Battery percentage (0-100%)
+- `state` - System state: IDLE, WATER_DETECTED, CLOSED, AUTO_DROP, etc.
+- `scheduler_locked` - Scheduler lock: 0=unlocked, 1=locked (water detected)
+
+> **Note:** Firmware also sends backward-compatible fields (`water_sensor_status`, `curtain_state`, `battery_soc_perc`) for legacy compatibility.
+
 ### POST /api/v1/command
 
 Send manual command to device.
@@ -459,6 +471,59 @@ Send manual command to device.
   "action": "DROP" // or "RAISE"
 }
 ```
+
+### GET /api/v1/telemetry
+
+Get historical telemetry data (time-series).
+
+**Query Parameters:**
+- `device_id` - Device identifier (default: ESP32_MAIN_001)
+- `limit` - Number of records (default: 100)
+
+**Response:** Array of telemetry records with timestamps.
+
+### GET /api/v1/alarms
+
+Get alarm history (water detection events).
+
+**Query Parameters:**
+- `device_id` - Device identifier
+- `limit` - Number of records (default: 50)
+
+### GET /api/v1/commands
+
+Get command history (user actions, scheduler actions).
+
+**Query Parameters:**
+- `device_id` - Device identifier
+- `limit` - Number of records (default: 50)
+
+### GET /api/v1/schedules
+
+Get configured automation schedules.
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "device_id": "ESP32_MAIN_001",
+    "action_type": "daily_raise",
+    "hour": 8,
+    "minute": 0,
+    "days": ["mon", "tue", "wed", "thu", "fri"],
+    "active": true,
+    "custom_label": "Morning open"
+  }
+]
+```
+
+**Scheduler Features:**
+- Automated daily raise/drop at configured times
+- Day-of-week filtering (e.g., weekdays only)
+- Safety override: scheduler locked when water detected
+- Worker monitors schedules every minute
+
 
 ---
 
@@ -530,13 +595,50 @@ from socketio import AsyncServer
 
 **Implementation Details:** See [firmware/README.md](firmware/README.md#-non-blocking-motor-control) for architecture diagram and code details.
 
-### 4. Manual Fail-Safe Timer Trigger
+### 4. Non-Blocking MQTT Reconnect
+
+**Design Challenge:** Initial implementation used blocking MQTT connection loop in `setup()`, preventing ESP32 from booting if broker was unavailable. Device would hang indefinitely showing "Booting..." on OLED.
+
+**Architectural Solution:**
+
+- **Setup Phase:** Max 3 connection attempts with 1-second timeout each
+- **Loop Phase:** Non-blocking reconnect every 30 seconds
+- **Autonomous Mode:** Device operates fully offline if MQTT unavailable
+
+**Implementation:**
+```cpp
+// setup() - Try 3 times, then continue
+int mqttAttempts = 0;
+while (!client.connected() && mqttAttempts < 3) {
+  if (client.connect(DEVICE_ID)) break;
+  mqttAttempts++;
+  delay(1000);
+}
+// Continue regardless of connection status
+
+// loop() - Retry every 30 seconds (non-blocking)
+static unsigned long lastMqttRetry = 0;
+if (!client.connected() && (millis() - lastMqttRetry > 30000)) {
+  lastMqttRetry = millis();
+  client.connect(DEVICE_ID);  // Single attempt, no blocking
+}
+```
+
+**Benefits:**
+- ✅ ESP32 boots in 3-4 seconds even without MQTT broker
+- ✅ Sensors, OLED, and motor control work offline
+- ✅ Automatic reconnection when broker becomes available
+- ✅ Water detection and auto-close work without backend
+
+**Result:** Device is fully autonomous and resilient to network failures.
+
+### 5. Manual Fail-Safe Timer Trigger
 
 The fail-safe countdown relies on client-side timer (`setInterval`). For critical systems, this should run server-side with the device itself enforcing the timeout via hardware interrupt (E-STOP button for production).
 
 **Current Safety Level:** Device has hardware E-STOP interrupt (GPIO2 pull-to-ground). Even if software fails, gate can be stopped physically.
 
-### 5. Credentials Management
+### 6. Credentials Management
 
 **Design Choice:** Sensitive credentials (WiFi, MQTT, GSM phone) stored in gitignored `Secrets.h` file, never committed to repository.
 
@@ -550,7 +652,7 @@ The fail-safe countdown relies on client-side timer (`setInterval`). For critica
 
 **Implementation:** See [firmware/README.md](firmware/README.md#-security--credentials) for setup instructions.
 
-### 6. EEPROM Wear Protection
+### 7. EEPROM Wear Protection
 
 **Design Choice:** Gate position saved to EEPROM only when changed (not every movement). Extends device lifetime from ~273 years to **137+ years** within the 100k write cycle limit.
 

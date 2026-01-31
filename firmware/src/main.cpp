@@ -1,3 +1,4 @@
+#include <AccelStepper.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Arduino.h>
@@ -6,7 +7,6 @@
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <Wire.h>
-#include <AccelStepper.h>
 
 #include "Constants.h"
 #include "Secrets.h"
@@ -14,15 +14,15 @@
 // ====== SYSTEM ARCHITECTURE ======
 // MOTOR CONTROL: NON-BLOCKING
 //
-// This implementation uses the AccelStepper library to ensure responsive 
+// This implementation uses the AccelStepper library to ensure responsive
 // MQTT communication during gate movement.
 //
 // Key Design Principles:
-// 1. Concurrency: The updateStepperMotion() function is called in every loop() 
+// 1. Concurrency: The updateStepperMotion() function is called in every loop()
 //    iteration, executing at most one step (~2ms).
-// 2. Responsiveness: MQTT client.loop() and sensor readings are processed 
+// 2. Responsiveness: MQTT client.loop() and sensor readings are processed
 //    between motor steps, preventing connection timeouts.
-// 3. Safety: A hardware E-STOP interrupt and software timeout (2 min) 
+// 3. Safety: A hardware E-STOP interrupt and software timeout (2 min)
 //    override any movement commands.
 //
 // Configuration:
@@ -69,15 +69,15 @@ void IRAM_ATTR onEStop() {
 const int EEPROM_ADDR_POSITION = 0; // EEPROM address for storing position
 
 // AccelStepper for NON-BLOCKING motor control
-const int STEPPER_STEPS_FULL = 800;
-int stepperPosition = 0;       // Current position: 0=fully open, 800=fully closed
-int lastStoredPosition = -1;   // Track last EEPROM write to prevent wear
-bool curtainDown = false;      // Derived from position (position >= 800)
+int stepperPosition = 0;     // Current position: 0=fully open, 800=fully closed
+int lastStoredPosition = -1; // Track last EEPROM write to prevent wear
+bool curtainDown = false;    // Derived from position (position >= 800)
 
 // EEPROM Wear Mitigation:
-// ESP32 EEPROM has ~100k write cycles limit. We only write when position actually changes.
-// lastStoredPosition prevents redundant writes during frequent sensor corrections.
-// Max wear: ~200 writes per year (2 movements/day × 365) = lifetime >> 100k cycles
+// ESP32 EEPROM has ~100k write cycles limit. We only write when position
+// actually changes. lastStoredPosition prevents redundant writes during
+// frequent sensor corrections. Max wear: ~200 writes per year (2 movements/day
+// × 365) = lifetime >> 100k cycles
 
 // Non-blocking stepper control
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEP, PIN_DIR);
@@ -85,7 +85,8 @@ bool stepperMoving = false;
 int stepperTargetPosition = 0;
 int stepperLedPin = -1;
 unsigned long stepperMotorStartTime = 0;
-const unsigned long STEPPER_MOTOR_TIMEOUT_MS = 120000; // 2 minutes safety timeout
+const unsigned long STEPPER_MOTOR_TIMEOUT_MS =
+    120000; // 2 minutes safety timeout
 
 // ====== THRESHOLDS ======
 const float WATER_ALARM_CM = 10.0;
@@ -145,23 +146,25 @@ void saveStepperPositionIfChanged() {
     EEPROM.write(EEPROM_ADDR_POSITION + 1, stepperPosition & 0xFF); // Low byte
     EEPROM.commit();
     lastStoredPosition = stepperPosition;
-    Serial.printf("[EEPROM] Position saved: %d steps (write cycle protection active)\n",
-                  stepperPosition);
+    Serial.printf(
+        "[EEPROM] Position saved: %d steps (write cycle protection active)\n",
+        stepperPosition);
   }
 }
 
 // ====== SMS NOTIFICATION FUNCTION ======
-// CURRENT: Simulation mode - publishes to MQTT debug/sms topic for Wokwi compatibility
-// PRODUCTION: Requires SIM800L GSM module. See production code snippet below.
+// CURRENT: Simulation mode - publishes to MQTT debug/sms topic for Wokwi
+// compatibility PRODUCTION: Requires SIM800L GSM module. See production code
+// snippet below.
 void sendSMS(const char *message) {
   char buffer[256];
   snprintf(buffer, sizeof(buffer), "[FloodGate] %s", message);
-  
+
   // SIMULATION MODE (Wokwi):
   // Publishes to MQTT topic for dashboard integration
   client.publish("debug/sms", buffer);
   Serial.println(String("[SMS] ") + buffer);
-  
+
   // PRODUCTION IMPLEMENTATION (SIM800L):
   // Uncomment the block below to enable GSM support.
   // Requires: SIM800L module on UART pins defined in config.
@@ -184,10 +187,9 @@ void drawScreen() {
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
 
-  // 128x64 OLED - Polish labels with progress bars
-  // Title
-  display.println("FLOODGATE");
-  display.println("----------");
+  // Title with version
+  display.println("FLOODGATE v1.0");
+  display.println("--------------");
 
   // BATERIA (Battery)
   display.setCursor(0, 16);
@@ -232,20 +234,28 @@ void drawScreen() {
 }
 
 void sendTelemetry() {
-  StaticJsonDocument<300> doc;
+  StaticJsonDocument<400> doc;
   doc["device_id"] = DEVICE_ID;
+
+  // Primary telemetry fields
   doc["water_level_cm"] = waterLevelCm;
-  doc["water_alarm"] = (waterLevelCm > WATER_ALARM_CM) ? 1 : 0;
-  doc["battery_pct"] = batteryPercent;
   doc["gate_closed"] = curtainDown ? 1 : 0;
-  doc["stepper_position"] = stepperPosition; // Track actual position
-  doc["stepper_percent"] =
-      (stepperPosition * 100) / STEPPER_STEPS_FULL; // 0-100%
+  doc["battery_pct"] = batteryPercent;
   doc["state"] = stateNames[currentState];
   doc["scheduler_locked"] = schedulerLocked ? 1 : 0;
-  doc["timestamp"] = millis(); // Milliseconds since boot for precise timing
 
-  char buffer[300];
+  // Backward compatibility fields
+  doc["water_alarm"] = (waterLevelCm > WATER_ALARM_CM) ? 1 : 0;
+  doc["water_sensor_status"] = (waterLevelCm > WATER_ALARM_CM) ? 1 : 0;
+  doc["curtain_state"] = curtainDown ? 1 : 0;
+  doc["battery_soc_perc"] = batteryPercent;
+
+  // Additional telemetry
+  doc["stepper_position"] = stepperPosition;
+  doc["stepper_percent"] = (stepperPosition * 100) / STEPPER_STEPS_FULL;
+  doc["timestamp"] = millis();
+
+  char buffer[400];
   serializeJson(doc, buffer);
   client.publish("system/" DEVICE_ID "/status", buffer);
   Serial.println(String("[Telemetry] ") + buffer);
@@ -298,7 +308,8 @@ void updateStepperMotion() {
     stepper.stop();
     stepper.disableOutputs();
     digitalWrite(PIN_RELAY, LOW);
-    if (stepperLedPin >= 0) digitalWrite(stepperLedPin, LOW);
+    if (stepperLedPin >= 0)
+      digitalWrite(stepperLedPin, LOW);
     stepperMoving = false;
     return;
   }
@@ -306,7 +317,7 @@ void updateStepperMotion() {
   // Limit switches (Production Mode)
   if (PRODUCTION_MODE) {
     bool movingDown = (stepper.currentPosition() > stepper.targetPosition());
-    
+
     if (movingDown && digitalRead(PIN_LIMIT_BOTTOM) == LOW) {
       Serial.println("[SAFETY] Limit switch BOTTOM reached.");
       stepperPosition = STEPPER_STEPS_FULL;
@@ -314,13 +325,14 @@ void updateStepperMotion() {
       stepper.stop();
       stepper.disableOutputs();
       digitalWrite(PIN_RELAY, LOW);
-      if (stepperLedPin >= 0) digitalWrite(stepperLedPin, LOW);
+      if (stepperLedPin >= 0)
+        digitalWrite(stepperLedPin, LOW);
       stepperMoving = false;
       curtainDown = true;
       sendTelemetry();
       return;
     }
-    
+
     if (!movingDown && digitalRead(PIN_LIMIT_TOP) == LOW) {
       Serial.println("[SAFETY] Limit switch TOP reached.");
       stepperPosition = 0;
@@ -328,7 +340,8 @@ void updateStepperMotion() {
       stepper.stop();
       stepper.disableOutputs();
       digitalWrite(PIN_RELAY, LOW);
-      if (stepperLedPin >= 0) digitalWrite(stepperLedPin, LOW);
+      if (stepperLedPin >= 0)
+        digitalWrite(stepperLedPin, LOW);
       stepperMoving = false;
       curtainDown = false;
       sendTelemetry();
@@ -344,7 +357,8 @@ void updateStepperMotion() {
     stepper.stop();
     stepper.disableOutputs();
     digitalWrite(PIN_RELAY, LOW);
-    if (stepperLedPin >= 0) digitalWrite(stepperLedPin, LOW);
+    if (stepperLedPin >= 0)
+      digitalWrite(stepperLedPin, LOW);
     stepperPosition = stepper.currentPosition();
     curtainDown = (stepperPosition >= STEPPER_STEPS_FULL);
     stepperMoving = false;
@@ -363,27 +377,28 @@ void updateStepperMotion() {
 // This replaces the old blocking stepperRunSteps() function
 void stepperRunSteps(int steps, bool dir, int ledPin) {
   if (stepperMoving) {
-    Serial.println("[STEPPER] Movement already in progress, ignoring new command");
+    Serial.println(
+        "[STEPPER] Movement already in progress, ignoring new command");
     return;
   }
 
-  Serial.printf("[STEPPER] Initiating movement: %d steps, direction=%s\n", steps,
-                dir ? "DOWN" : "UP");
+  Serial.printf("[STEPPER] Initiating movement: %d steps, direction=%s\n",
+                steps, dir ? "DOWN" : "UP");
 
   int targetPos = dir ? (stepperPosition + steps) : (stepperPosition - steps);
-  
+
   // Clamp target position to valid range
   targetPos = clampi(targetPos, 0, STEPPER_STEPS_FULL);
 
   // Configure AccelStepper for non-blocking operation
   stepper.setCurrentPosition(stepperPosition);
-  stepper.setMaxSpeed(500.0);        // Steps per second
-  stepper.setAcceleration(1000.0);   // Steps per second^2
+  stepper.setMaxSpeed(500.0);      // Steps per second
+  stepper.setAcceleration(1000.0); // Steps per second^2
   stepper.moveTo(targetPos);
   stepper.enableOutputs();
 
   digitalWrite(PIN_DIR, dir ? HIGH : LOW);
-  digitalWrite(ledPin, HIGH);  // LED ON during movement
+  digitalWrite(ledPin, HIGH); // LED ON during movement
   digitalWrite(PIN_RELAY, HIGH);
   delay(20);
 
@@ -576,9 +591,9 @@ void setup() {
 
   // Initialize AccelStepper for non-blocking motor control
   stepper.setCurrentPosition(stepperPosition);
-  stepper.setMaxSpeed(500.0);        // Steps per second
-  stepper.setAcceleration(1000.0);   // Steps per second^2
-  stepper.disableOutputs();          // Disable until needed
+  stepper.setMaxSpeed(500.0);      // Steps per second
+  stepper.setAcceleration(1000.0); // Steps per second^2
+  stepper.disableOutputs();        // Disable until needed
   Serial.println("[STEPPER] AccelStepper initialized (non-blocking mode)");
 
   // Test LEDs at startup
@@ -601,7 +616,8 @@ void setup() {
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
-    display.println("FloodGate v1.0");
+    display.println("FloodGate");
+    display.println("Version 1.0");
     display.println("Booting...");
     display.display();
   } else {
@@ -625,15 +641,12 @@ void setup() {
 
   client.setServer(MQTT_SERVER, 1883);
   client.setCallback(callback);
-}
 
-void loop() {
-  // ===== CRITICAL: Non-blocking motor control (runs every iteration) =====
-  // This allows MQTT to be processed even during motor movement
-  updateStepperMotion();
-
-  if (!client.connected()) {
-    Serial.print("⏳ MQTT...");
+  // Try to connect to MQTT (max 3 attempts, non-blocking)
+  Serial.print("⏳ Connecting to MQTT");
+  int mqttAttempts = 0;
+  while (!client.connected() && mqttAttempts < 3) {
+    Serial.print(".");
     if (client.connect(DEVICE_ID)) {
       Serial.println(" ✅");
       client.subscribe("system/" DEVICE_ID "/action");
@@ -642,23 +655,56 @@ void loop() {
       client.subscribe("system/" DEVICE_ID "/config");
       if (SIMULATION_MODE)
         client.subscribe("simulation/input");
-      offlineRetryCount = 0;
-
-      // Send telemetry immediately when connected
       sendTelemetry();
-      Serial.println("📡 Initial telemetry sent");
-    } else {
-      Serial.println(" ❌");
-      if (currentState == STATE_WATER_DETECTED) {
-        if (offlineRetryCount == 0)
-          offlineLastRetry = millis();
-        currentState = STATE_OFFLINE_FALLBACK;
-      }
-      delay(2000);
-      return;
+      break;
     }
+    mqttAttempts++;
+    delay(1000);
   }
-  client.loop();
+
+  if (!client.connected()) {
+    Serial.println(" ❌");
+    Serial.println("⚠️  MQTT offline - running in AUTONOMOUS mode");
+  }
+
+  Serial.println("✓ Sensors initialized");
+  Serial.println("✓ Entering main loop\n");
+
+  // Update OLED to show ready state
+  if (displayOk) {
+  }
+}
+
+void loop() {
+  // ===== CRITICAL: Non-blocking motor control (runs every iteration) =====
+  // This allows MQTT to be processed even during motor movement
+  updateStepperMotion();
+
+  // Non-blocking MQTT reconnect (try every 30 seconds)
+  static unsigned long lastMqttRetry = 0;
+  if (!client.connected()) {
+    unsigned long now = millis();
+    if (now - lastMqttRetry > 30000) { // Try every 30 seconds
+      lastMqttRetry = now;
+      Serial.print("⏳ MQTT reconnect...");
+      if (client.connect(DEVICE_ID)) {
+        Serial.println(" ✅");
+        client.subscribe("system/" DEVICE_ID "/action");
+        client.subscribe("system/" DEVICE_ID "/user_command");
+        client.subscribe("system/" DEVICE_ID "/schedule_command");
+        client.subscribe("system/" DEVICE_ID "/config");
+        if (SIMULATION_MODE)
+          client.subscribe("simulation/input");
+        offlineRetryCount = 0;
+        sendTelemetry();
+      } else {
+        Serial.println(" ❌");
+        offlineRetryCount++;
+      }
+    }
+  } else {
+    client.loop(); // Process MQTT messages only when connected
+  }
 
   waterRaw = analogRead(PIN_WATER_SENSOR);
   batteryRaw = analogRead(PIN_BATTERY_SENSOR);
@@ -678,6 +724,8 @@ void loop() {
     // Low battery warning - send only once
     if (batteryPercent < 15) {
       if (!batteryWarningSent) {
+        Serial.println("WARNING: Low battery! Remaining: " +
+                       String(batteryPercent) + "%. Please charge soon.");
         String msg =
             "⚠️ Niski poziom baterii! Pozostało: " + String(batteryPercent) +
             "%";

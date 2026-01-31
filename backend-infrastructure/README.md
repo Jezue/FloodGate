@@ -52,6 +52,7 @@ Expected tables:
 - `device_telemetry` (hypertable)
 - `current_device_state`
 - `command_queue`
+- `schedules` (automation schedules)
 
 ### 5. Access Services
 
@@ -119,6 +120,10 @@ Latest state for each device - optimized for fast API queries.
 ### command_queue (Command Audit)
 
 Tracks all commands sent to devices with execution status.
+
+### schedules (Automation Schedules)
+
+Configured automation rules for daily gate raise/drop at specific times. Supports day-of-week filtering and safety overrides.
 
 ## Troubleshooting
 
