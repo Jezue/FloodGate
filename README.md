@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/shield-logo.svg" width="120" alt="FloodGate Logo" />
+  <img src="docs/assets/logo.png" width="128" height="128" alt="FloodGate Logo" />
 </p>
 
 <h1 align="center">FloodGate: Autonomous Flood Protection System</h1>
